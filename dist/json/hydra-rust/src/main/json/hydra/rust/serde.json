@@ -427,10 +427,15 @@
                             "function": {
                               "application": {
                                 "function": {"variable": "hydra.core.serialization.curlyBracesList"},
-                                "argument": {"typeApplication": {"body": {"optional": null}, "type": {"literal": "string"}}}}},
+                                "argument": {"optional": {"literal": {"string": ""}}}}},
                             "argument": {"variable": "hydra.core.serialization.halfBlockStyle"}}},
                         "argument": {"variable": "allParts"}}}}}}},
-            "annotation": {"map": [{"key": {"variable": "description"}, "value": {"literal": {"string": "Serialize a block"}}}]}}}}},
+            "annotation": {
+              "map": [
+                {
+                  "key": {"variable": "description"},
+                  "value": {
+                    "literal": {"string": "Serialize a block. Statements already end in semicolons, so the block adds no separator of its own."}}}]}}}}},
     {
       "term": {
         "name": "hydra.rust.serde.callExprToExpr",
@@ -460,13 +465,35 @@
                           "application": {
                             "function": {"project": {"typeName": "hydra.rust.syntax.CallExpr", "fieldName": "args"}},
                             "argument": {"variable": "c"}}},
-                        "typeScheme": {"variables": [], "body": {"list": {"variable": "hydra.rust.syntax.Expression"}}, "constraints": []}}],
+                        "typeScheme": {"variables": [], "body": {"list": {"variable": "hydra.rust.syntax.Expression"}}, "constraints": []}},
+                      {
+                        "name": "funcExpr",
+                        "term": {"application": {"function": {"variable": "hydra.rust.serde.expressionToExpr"}, "argument": {"variable": "func"}}},
+                        "typeScheme": {"variables": [], "body": {"variable": "hydra.core.ast.Expr"}, "constraints": []}},
+                      {
+                        "name": "callee",
+                        "term": {
+                          "application": {
+                            "function": {
+                              "cases": {
+                                "typeName": "hydra.rust.syntax.Expression",
+                                "default": {"variable": "funcExpr"},
+                                "cases": [
+                                  {
+                                    "name": "closure",
+                                    "handler": {
+                                      "lambda": {
+                                        "parameter": "ignored",
+                                        "domain": {"variable": "hydra.rust.syntax.ClosureExpr"},
+                                        "body": {"application": {"function": {"variable": "hydra.core.serialization.parens"}, "argument": {"variable": "funcExpr"}}}}}}]}},
+                            "argument": {"variable": "func"}}},
+                        "typeScheme": {"variables": [], "body": {"variable": "hydra.core.ast.Expr"}, "constraints": []}}],
                     "body": {
                       "application": {
                         "function": {"variable": "hydra.core.serialization.spaceSep"},
                         "argument": {
                           "list": [
-                            {"application": {"function": {"variable": "hydra.rust.serde.expressionToExpr"}, "argument": {"variable": "func"}}},
+                            {"variable": "callee"},
                             {
                               "application": {
                                 "function": {"variable": "hydra.core.serialization.parenListAdaptive"},
@@ -482,7 +509,12 @@
                                         "argument": {"variable": "hydra.rust.serde.expressionToExpr"}}},
                                     "argument": {"variable": "args"}}}}}]}}}}}}},
             "annotation": {
-              "map": [{"key": {"variable": "description"}, "value": {"literal": {"string": "Serialize a function call expression"}}}]}}}}},
+              "map": [
+                {
+                  "key": {"variable": "description"},
+                  "value": {
+                    "literal": {
+                      "string": "Serialize a function call expression. A closure callee is parenthesized because Rust binds a following call to the closure body."}}}]}}}}},
     {
       "term": {
         "name": "hydra.rust.serde.castExprToExpr",
@@ -996,6 +1028,28 @@
                         "term": {"application": {"function": {"variable": "hydra.rust.serde.derivesToExpr"}, "argument": {"variable": "derives"}}},
                         "typeScheme": {"variables": [], "body": {"optional": {"variable": "hydra.core.ast.Expr"}}, "constraints": []}},
                       {
+                        "name": "isPublic",
+                        "term": {
+                          "application": {
+                            "function": {"project": {"typeName": "hydra.rust.syntax.EnumDef", "fieldName": "public"}},
+                            "argument": {"variable": "e"}}},
+                        "typeScheme": {"variables": [], "body": {"literal": "boolean"}, "constraints": []}},
+                      {
+                        "name": "pubKw",
+                        "term": {
+                          "application": {
+                            "function": {
+                              "application": {
+                                "function": {
+                                  "application": {
+                                    "function": {
+                                      "typeApplication": {"body": {"variable": "hydra.core.lib.logic.ifElse"}, "type": {"optional": {"variable": "hydra.core.ast.Expr"}}}},
+                                    "argument": {"variable": "isPublic"}}},
+                                "argument": {
+                                  "optional": {"application": {"function": {"variable": "hydra.core.serialization.cst"}, "argument": {"literal": {"string": "pub"}}}}}}},
+                            "argument": {"typeApplication": {"body": {"optional": null}, "type": {"variable": "hydra.core.ast.Expr"}}}}},
+                        "typeScheme": {"variables": [], "body": {"optional": {"variable": "hydra.core.ast.Expr"}}, "constraints": []}},
+                      {
                         "name": "docPart",
                         "term": {
                           "application": {
@@ -1031,6 +1085,7 @@
                                   "typeApplication": {"body": {"variable": "hydra.core.lib.optionals.givens"}, "type": {"variable": "hydra.core.ast.Expr"}}},
                                 "argument": {
                                   "list": [
+                                    {"variable": "pubKw"},
                                     {
                                       "optional": {"application": {"function": {"variable": "hydra.core.serialization.cst"}, "argument": {"literal": {"string": "enum"}}}}},
                                     {
@@ -1116,7 +1171,12 @@
                                             "function": {
                                               "typeApplication": {"body": {"variable": "hydra.core.lib.optionals.givens"}, "type": {"variable": "hydra.core.ast.Expr"}}},
                                             "argument": {"list": [{"optional": {"variable": "header"}}, {"variable": "wherePart"}, {"optional": {"variable": "body"}}]}}}}}]}]}}}}}}}}},
-            "annotation": {"map": [{"key": {"variable": "description"}, "value": {"literal": {"string": "Serialize an enum definition"}}}]}}}}},
+            "annotation": {
+              "map": [
+                {
+                  "key": {"variable": "description"},
+                  "value": {
+                    "literal": {"string": "Serialize an enum definition. A public enum prints pub on the keyword line, after any derive attribute."}}}]}}}}},
     {
       "term": {
         "name": "hydra.rust.serde.enumVariantBodyToExpr",
@@ -3588,7 +3648,32 @@
                       {
                         "name": "itemPart",
                         "term": {"application": {"function": {"variable": "hydra.rust.serde.itemToExpr"}, "argument": {"variable": "item"}}},
-                        "typeScheme": {"variables": [], "body": {"variable": "hydra.core.ast.Expr"}, "constraints": []}}],
+                        "typeScheme": {"variables": [], "body": {"variable": "hydra.core.ast.Expr"}, "constraints": []}},
+                      {
+                        "name": "outerVis",
+                        "term": {
+                          "application": {
+                            "function": {
+                              "cases": {
+                                "typeName": "hydra.rust.syntax.Item",
+                                "default": {"variable": "visPart"},
+                                "cases": [
+                                  {
+                                    "name": "struct",
+                                    "handler": {
+                                      "lambda": {
+                                        "parameter": "ignored",
+                                        "domain": {"variable": "hydra.rust.syntax.StructDef"},
+                                        "body": {"typeApplication": {"body": {"optional": null}, "type": {"variable": "hydra.core.ast.Expr"}}}}}},
+                                  {
+                                    "name": "enum",
+                                    "handler": {
+                                      "lambda": {
+                                        "parameter": "ignored",
+                                        "domain": {"variable": "hydra.rust.syntax.EnumDef"},
+                                        "body": {"typeApplication": {"body": {"optional": null}, "type": {"variable": "hydra.core.ast.Expr"}}}}}}]}},
+                            "argument": {"variable": "item"}}},
+                        "typeScheme": {"variables": [], "body": {"optional": {"variable": "hydra.core.ast.Expr"}}, "constraints": []}}],
                     "body": {
                       "application": {
                         "function": {"variable": "hydra.core.serialization.newlineSep"},
@@ -3607,12 +3692,14 @@
                                           "application": {
                                             "function": {
                                               "typeApplication": {"body": {"variable": "hydra.core.lib.optionals.givens"}, "type": {"variable": "hydra.core.ast.Expr"}}},
-                                            "argument": {"list": [{"variable": "visPart"}, {"optional": {"variable": "itemPart"}}]}}}}}]}]}}}}}}}}},
+                                            "argument": {"list": [{"variable": "outerVis"}, {"optional": {"variable": "itemPart"}}]}}}}}]}]}}}}}}}}},
             "annotation": {
               "map": [
                 {
                   "key": {"variable": "description"},
-                  "value": {"literal": {"string": "Serialize an item with optional doc comments and visibility"}}}]}}}}},
+                  "value": {
+                    "literal": {
+                      "string": "Serialize an item with optional doc comments and visibility. Struct and enum visibility is printed on the keyword line, after derive attributes, because Rust rejects pub before #[derive]."}}}]}}}}},
     {
       "term": {
         "name": "hydra.rust.serde.letStatementToExpr",
@@ -4154,7 +4241,7 @@
                                     "function": {
                                       "application": {
                                         "function": {"variable": "hydra.core.serialization.curlyBracesList"},
-                                        "argument": {"typeApplication": {"body": {"optional": null}, "type": {"literal": "string"}}}}},
+                                        "argument": {"optional": {"literal": {"string": ""}}}}},
                                     "argument": {"variable": "hydra.core.serialization.halfBlockStyle"}}},
                                 "argument": {
                                   "application": {
@@ -4167,7 +4254,13 @@
                                             "type": {"variable": "hydra.core.ast.Expr"}}},
                                         "argument": {"variable": "hydra.rust.serde.matchArmToExpr"}}},
                                     "argument": {"variable": "arms"}}}}}]}}}}}}},
-            "annotation": {"map": [{"key": {"variable": "description"}, "value": {"literal": {"string": "Serialize a match expression"}}}]}}}}},
+            "annotation": {
+              "map": [
+                {
+                  "key": {"variable": "description"},
+                  "value": {
+                    "literal": {
+                      "string": "Serialize a match expression. Each arm already ends with a comma, so the arm list adds no separator of its own."}}}]}}}}},
     {
       "term": {
         "name": "hydra.rust.serde.methodCallExprToExpr",
@@ -5358,6 +5451,28 @@
                         "term": {"application": {"function": {"variable": "hydra.rust.serde.derivesToExpr"}, "argument": {"variable": "derives"}}},
                         "typeScheme": {"variables": [], "body": {"optional": {"variable": "hydra.core.ast.Expr"}}, "constraints": []}},
                       {
+                        "name": "isPublic",
+                        "term": {
+                          "application": {
+                            "function": {"project": {"typeName": "hydra.rust.syntax.StructDef", "fieldName": "public"}},
+                            "argument": {"variable": "s"}}},
+                        "typeScheme": {"variables": [], "body": {"literal": "boolean"}, "constraints": []}},
+                      {
+                        "name": "pubKw",
+                        "term": {
+                          "application": {
+                            "function": {
+                              "application": {
+                                "function": {
+                                  "application": {
+                                    "function": {
+                                      "typeApplication": {"body": {"variable": "hydra.core.lib.logic.ifElse"}, "type": {"optional": {"variable": "hydra.core.ast.Expr"}}}},
+                                    "argument": {"variable": "isPublic"}}},
+                                "argument": {
+                                  "optional": {"application": {"function": {"variable": "hydra.core.serialization.cst"}, "argument": {"literal": {"string": "pub"}}}}}}},
+                            "argument": {"typeApplication": {"body": {"optional": null}, "type": {"variable": "hydra.core.ast.Expr"}}}}},
+                        "typeScheme": {"variables": [], "body": {"optional": {"variable": "hydra.core.ast.Expr"}}, "constraints": []}},
+                      {
                         "name": "docPart",
                         "term": {
                           "application": {
@@ -5393,6 +5508,7 @@
                                   "typeApplication": {"body": {"variable": "hydra.core.lib.optionals.givens"}, "type": {"variable": "hydra.core.ast.Expr"}}},
                                 "argument": {
                                   "list": [
+                                    {"variable": "pubKw"},
                                     {
                                       "optional": {
                                         "application": {"function": {"variable": "hydra.core.serialization.cst"}, "argument": {"literal": {"string": "struct"}}}}},
@@ -5461,7 +5577,12 @@
                                                 {"variable": "wherePart"},
                                                 {
                                                   "optional": {"application": {"function": {"variable": "hydra.rust.serde.structBodyToExpr"}, "argument": {"variable": "body"}}}}]}}}}}]}]}}}}}}}}},
-            "annotation": {"map": [{"key": {"variable": "description"}, "value": {"literal": {"string": "Serialize a struct definition"}}}]}}}}},
+            "annotation": {
+              "map": [
+                {
+                  "key": {"variable": "description"},
+                  "value": {
+                    "literal": {"string": "Serialize a struct definition. A public struct prints pub on the keyword line, after any derive attribute."}}}]}}}}},
     {
       "term": {
         "name": "hydra.rust.serde.structExprToExpr",

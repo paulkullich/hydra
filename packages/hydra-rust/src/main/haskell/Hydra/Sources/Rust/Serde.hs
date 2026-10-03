@@ -269,14 +269,14 @@ binaryOpToExpr = define "binaryOpToExpr" $
 
 blockToExpr :: TypedTermDefinition (R.Block -> Expr)
 blockToExpr = define "blockToExpr" $
-  doc "Serialize a block" $
+  doc "Serialize a block. Statements already end in semicolons, so the block adds no separator of its own." $
   lambda "b" $ lets [
     "stmts">: project R._Block R._Block_statements @@ var "b",
     "expr">: project R._Block R._Block_expression @@ var "b",
     "stmtExprs">: Lists.map (asTerm statementToExpr) (var "stmts"),
     "exprPart">: Optionals.match (var "expr") (list ([] :: [TypedTerm Expr])) (lambda "e" $ list [expressionToExpr @@ var "e"]),
     "allParts">: Lists.concat2 (var "stmtExprs") (var "exprPart")] $
-    Serialization.curlyBracesList @@ nothing @@ Serialization.halfBlockStyle @@ var "allParts"
+    Serialization.curlyBracesList @@ (just $ string "") @@ Serialization.halfBlockStyle @@ var "allParts"
 
 -- =============================================================================
 -- Patterns
@@ -284,12 +284,15 @@ blockToExpr = define "blockToExpr" $
 
 callExprToExpr :: TypedTermDefinition (R.CallExpr -> Expr)
 callExprToExpr = define "callExprToExpr" $
-  doc "Serialize a function call expression" $
+  doc "Serialize a function call expression. A closure callee is parenthesized because Rust binds a following call to the closure body." $
   lambda "c" $ lets [
     "func">: project R._CallExpr R._CallExpr_function @@ var "c",
-    "args">: project R._CallExpr R._CallExpr_args @@ var "c"] $
+    "args">: project R._CallExpr R._CallExpr_args @@ var "c",
+    "funcExpr">: expressionToExpr @@ var "func",
+    "callee">: match R._Expression (var "func") (Just $ var "funcExpr") [
+      R._Expression_closure>>: lambda "ignored" $ Serialization.parens @@ var "funcExpr"]] $
     Serialization.spaceSep @@ list [
-      expressionToExpr @@ var "func",
+      var "callee",
       Serialization.parenListAdaptive @@ (Lists.map (asTerm expressionToExpr) (var "args"))]
 
 castExprToExpr :: TypedTermDefinition (R.CastExpr -> Expr)
@@ -396,7 +399,7 @@ derivesToExpr = define "derivesToExpr" $
 
 enumDefToExpr :: TypedTermDefinition (R.EnumDef -> Expr)
 enumDefToExpr = define "enumDefToExpr" $
-  doc "Serialize an enum definition" $
+  doc "Serialize an enum definition. A public enum prints pub on the keyword line, after any derive attribute." $
   lambda "e" $ lets [
     "name">: project R._EnumDef R._EnumDef_name @@ var "e",
     "generics">: project R._EnumDef R._EnumDef_generics @@ var "e",
@@ -405,8 +408,11 @@ enumDefToExpr = define "enumDefToExpr" $
     "derives">: project R._EnumDef R._EnumDef_derives @@ var "e",
     "docC">: project R._EnumDef R._EnumDef_doc @@ var "e",
     "derivesAttr">: derivesToExpr @@ var "derives",
+    "isPublic">: project R._EnumDef R._EnumDef_public @@ var "e",
+    "pubKw">: Logic.ifElse (var "isPublic") (just $ Serialization.cst @@ string "pub") nothing,
     "docPart">: Optionals.match (var "docC") (list ([] :: [TypedTerm Expr])) (lambda "d" $ list [Serialization.cst @@ (toRustDocComment @@ var "d")]),
     "header">: Serialization.spaceSep @@ Optionals.givens (list [
+      var "pubKw",
       just $ Serialization.cst @@ string "enum",
       just $ Serialization.cst @@ var "name",
       genericParamsToExpr @@ var "generics"]),
@@ -817,16 +823,20 @@ itemToExpr = define "itemToExpr" $
 
 itemWithCommentsToExpr :: TypedTermDefinition (R.ItemWithComments -> Expr)
 itemWithCommentsToExpr = define "itemWithCommentsToExpr" $
-  doc "Serialize an item with optional doc comments and visibility" $
+  doc "Serialize an item with optional doc comments and visibility. Struct and enum visibility is printed on the keyword line, after derive attributes, because Rust rejects pub before #[derive]." $
   lambda "iwc" $ lets [
     "doc">: project R._ItemWithComments R._ItemWithComments_doc @@ var "iwc",
     "vis">: project R._ItemWithComments R._ItemWithComments_visibility @@ var "iwc",
     "item">: project R._ItemWithComments R._ItemWithComments_item @@ var "iwc",
     "docPart">: Optionals.match (var "doc") (list ([] :: [TypedTerm Expr])) (lambda "d" $ list [Serialization.cst @@ (toRustDocComment @@ var "d")]),
     "visPart">: visibilityToExpr @@ var "vis",
-    "itemPart">: itemToExpr @@ var "item"] $
+    "itemPart">: itemToExpr @@ var "item",
+    -- Struct and enum items carry their own public flag and leading derive attributes.
+    "outerVis">: match R._Item (var "item") (Just $ var "visPart") [
+      R._Item_struct>>: lambda "ignored" $ nothing,
+      R._Item_enum>>: lambda "ignored" $ nothing]] $
     Serialization.newlineSep @@ Lists.concat (list [var "docPart", list [
-      Serialization.spaceSep @@ Optionals.givens (list [var "visPart", just (var "itemPart")])]])
+      Serialization.spaceSep @@ Optionals.givens (list [var "outerVis", just (var "itemPart")])]])
 
 letStatementToExpr :: TypedTermDefinition (R.LetStatement -> Expr)
 letStatementToExpr = define "letStatementToExpr" $
@@ -918,14 +928,14 @@ matchArmToExpr = define "matchArmToExpr" $
 
 matchExprToExpr :: TypedTermDefinition (R.MatchExpr -> Expr)
 matchExprToExpr = define "matchExprToExpr" $
-  doc "Serialize a match expression" $
+  doc "Serialize a match expression. Each arm already ends with a comma, so the arm list adds no separator of its own." $
   lambda "m" $ lets [
     "scrut">: project R._MatchExpr R._MatchExpr_scrutinee @@ var "m",
     "arms">: project R._MatchExpr R._MatchExpr_arms @@ var "m"] $
     Serialization.spaceSep @@ list [
       Serialization.cst @@ string "match",
       expressionToExpr @@ var "scrut",
-      Serialization.curlyBracesList @@ nothing @@ Serialization.halfBlockStyle @@
+      Serialization.curlyBracesList @@ (just $ string "") @@ Serialization.halfBlockStyle @@
         (Lists.map (asTerm matchArmToExpr) (var "arms"))]
 
 methodCallExprToExpr :: TypedTermDefinition (R.MethodCallExpr -> Expr)
@@ -1124,7 +1134,7 @@ structBodyToExpr = define "structBodyToExpr" $
 
 structDefToExpr :: TypedTermDefinition (R.StructDef -> Expr)
 structDefToExpr = define "structDefToExpr" $
-  doc "Serialize a struct definition" $
+  doc "Serialize a struct definition. A public struct prints pub on the keyword line, after any derive attribute." $
   lambda "s" $ lets [
     "name">: project R._StructDef R._StructDef_name @@ var "s",
     "generics">: project R._StructDef R._StructDef_generics @@ var "s",
@@ -1133,8 +1143,11 @@ structDefToExpr = define "structDefToExpr" $
     "derives">: project R._StructDef R._StructDef_derives @@ var "s",
     "docC">: project R._StructDef R._StructDef_doc @@ var "s",
     "derivesAttr">: derivesToExpr @@ var "derives",
+    "isPublic">: project R._StructDef R._StructDef_public @@ var "s",
+    "pubKw">: Logic.ifElse (var "isPublic") (just $ Serialization.cst @@ string "pub") nothing,
     "docPart">: Optionals.match (var "docC") (list ([] :: [TypedTerm Expr])) (lambda "d" $ list [Serialization.cst @@ (toRustDocComment @@ var "d")]),
     "header">: Serialization.spaceSep @@ Optionals.givens (list [
+      var "pubKw",
       just $ Serialization.cst @@ string "struct",
       just $ Serialization.cst @@ var "name",
       genericParamsToExpr @@ var "generics"]),

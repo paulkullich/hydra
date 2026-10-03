@@ -26,6 +26,8 @@ import qualified Hydra.Core.Dsl.Coders                     as Coders
 import qualified Hydra.Core.Overlay.Haskell.Dsl.Meta.Core                       as Core
 import qualified Hydra.Core.Dsl.Errors                      as Error
 import qualified Hydra.Core.Dsl.Packaging                     as Packaging
+import qualified Hydra.Core.Dsl.Typing                      as Typing
+import qualified Hydra.Core.Typing                          as TermTyping
 import qualified Hydra.Core.Dsl.Util                       as Util
 import qualified Hydra.Sources.Kernel.Terms.Formatting     as Formatting
 import qualified Hydra.Sources.Kernel.Terms.Names          as Names
@@ -62,11 +64,17 @@ module_ = Module {
             moduleMetadata = descriptionMetadata (Just "Rust code generator: converts Hydra type and term modules to Rust source code")}
   where
     definitions = [
+      toDefinition applicationSpine,
+      toDefinition encodeApplied,
+      toDefinition encodeCurriedCall,
       toDefinition encodeEnumVariant,
       toDefinition encodeLiteral,
       toDefinition encodeLiteralType,
       toDefinition encodeProjectionElim,
       toDefinition encodeStructField,
+      toDefinition encodeIntegerPrimitive,
+      toDefinition encodeNamedCall,
+      toDefinition encodeParameter,
       toDefinition encodeTerm,
       toDefinition encodeTermDefinition,
       toDefinition encodeType,
@@ -84,7 +92,8 @@ module_ = Module {
       toDefinition rustPath,
       toDefinition rustPathSegmented,
       toDefinition rustUnit,
-      toDefinition standardDerives]
+      toDefinition standardDerives,
+      toDefinition supportItems]
 
 -- =============================================================================
 -- Standard derives
@@ -92,6 +101,97 @@ module_ = Module {
 
 def :: String -> TypedTerm a -> TypedTermDefinition a
 def = definitionInModule module_
+
+-- Haskell helpers below only build DSL terms. The generated coder inlines them.
+
+cloned :: TypedTerm R.Expression -> TypedTerm R.Expression
+cloned expr =
+  inject R._Expression R._Expression_methodCall $
+    record R._MethodCallExpr [
+      R._MethodCallExpr_receiver>>: expr,
+      R._MethodCallExpr_method>>: string "clone",
+      R._MethodCallExpr_turbofish>>: list ([] :: [TypedTerm R.Type]),
+      R._MethodCallExpr_args>>: list ([] :: [TypedTerm R.Expression])]
+
+rustBinary :: TypedTerm R.Expression -> TypedTerm R.BinaryOp -> TypedTerm R.Expression -> TypedTerm R.Expression
+rustBinary left op right =
+  inject R._Expression R._Expression_binary $
+    record R._BinaryExpr [
+      R._BinaryExpr_left>>: left,
+      R._BinaryExpr_op>>: op,
+      R._BinaryExpr_right>>: right]
+
+ifExpr :: TypedTerm R.Expression -> TypedTerm R.Expression -> TypedTerm R.Expression -> TypedTerm R.Expression
+ifExpr cond thenExpr elseExpr =
+  inject R._Expression R._Expression_if $
+    record R._IfExpr [
+      R._IfExpr_condition>>: inject R._IfCondition R._IfCondition_bool cond,
+      R._IfExpr_thenBlock>>: record R._Block [
+        R._Block_statements>>: list ([] :: [TypedTerm R.Statement]),
+        R._Block_expression>>: just thenExpr],
+      -- Rust requires the else branch to be a block or another if.
+      R._IfExpr_elseBranch>>: just (rustBlock @@ list ([] :: [TypedTerm R.Statement]) @@ elseExpr)]
+
+panicStuck :: TypedTerm R.Expression
+panicStuck =
+  inject R._Expression R._Expression_macro $
+    record R._MacroInvocation [
+      R._MacroInvocation_path>>: list [string "panic"],
+      R._MacroInvocation_delimiter>>: inject R._MacroDelimiter R._MacroDelimiter_paren unit,
+      R._MacroInvocation_tokens>>: string "\"stuck\""]
+
+localSnake :: TypedTerm Name -> TypedTerm String
+localSnake name =
+  Formatting.convertCaseCamelToLowerSnake @@
+    (Formatting.sanitizeWithUnderscores @@ RustLanguageSource.rustReservedWords @@
+      (Names.localNameOf @@ name))
+
+-- Drop type arguments before the local name, and map the prelude types.
+rustNominal :: TypedTerm Name -> TypedTerm String
+rustNominal name =
+  Optionals.match (Lists.head (Strings.splitOn (string "<") (Core.unName name)))
+    (string "Unit")
+    (lambda "headName" $
+      Logic.ifElse (Equality.equal (var "headName") (string "integers.Order"))
+        (string "IntegersOrder")
+        (Logic.ifElse (Equality.equal (var "headName") (string "either"))
+          (string "Either")
+          (Formatting.capitalize @@ (Names.localNameOf @@ wrap _Name (var "headName")))))
+
+genericParam :: String -> TypedTerm R.GenericParam
+genericParam gname =
+  record R._GenericParam [
+    R._GenericParam_name>>: string gname,
+    R._GenericParam_bounds>>: list ([] :: [TypedTerm R.TypeParamBound])]
+
+unitVariant :: String -> TypedTerm R.EnumVariant
+unitVariant vname =
+  record R._EnumVariant [
+    R._EnumVariant_name>>: string vname,
+    R._EnumVariant_body>>: inject R._EnumVariantBody R._EnumVariantBody_unit unit,
+    R._EnumVariant_doc>>: nothing]
+
+tupleVariant :: String -> TypedTerm R.Type -> TypedTerm R.EnumVariant
+tupleVariant vname typ =
+  record R._EnumVariant [
+    R._EnumVariant_name>>: string vname,
+    R._EnumVariant_body>>: inject R._EnumVariantBody R._EnumVariantBody_tuple $ list [typ],
+    R._EnumVariant_doc>>: nothing]
+
+pubEnum :: TypedTerm String -> TypedTerm [R.GenericParam] -> TypedTerm [R.EnumVariant] -> TypedTerm R.ItemWithComments
+pubEnum ename generics variants =
+  record R._ItemWithComments [
+    R._ItemWithComments_doc>>: nothing,
+    R._ItemWithComments_visibility>>: inject R._Visibility R._Visibility_public unit,
+    R._ItemWithComments_item>>: inject R._Item R._Item_enum $
+      record R._EnumDef [
+        R._EnumDef_name>>: ename,
+        R._EnumDef_generics>>: generics,
+        R._EnumDef_whereClause>>: nothing,
+        R._EnumDef_variants>>: variants,
+        R._EnumDef_derives>>: asTerm standardDerives,
+        R._EnumDef_public>>: boolean True,
+        R._EnumDef_doc>>: nothing]]
 
 -- | Encode a Hydra union field as a Rust enum variant
 encodeEnumVariant :: TypedTermDefinition (InferenceContext -> Graph -> FieldType -> Either Error R.EnumVariant)
@@ -139,8 +239,9 @@ encodeLiteral = def "encodeLiteral" $
       inject R._Expression R._Expression_literal $
         inject R._Literal R._Literal_bool (var "b"),
     _Literal_string>>: lambda "s" $
-      inject R._Expression R._Expression_literal $
-        inject R._Literal R._Literal_string (var "s"),
+      rustCall @@ (rustExprPath @@ string "String::from") @@ list [
+        inject R._Expression R._Expression_literal $
+          inject R._Literal R._Literal_string (var "s")],
     _Literal_float>>: lambda "fv" $
       match _FloatValue (var "fv") Nothing [
         _FloatValue_float32>>: lambda "f" $
@@ -255,18 +356,18 @@ encodeProjectionElim = def "encodeProjectionElim" $
   "cx" ~> "g" ~> lambda "proj" $ lambda "marg" $
         "fname" <~ (Formatting.convertCaseCamelToLowerSnake @@ Core.unName (Core.projectionFieldName (var "proj"))) $
         Optionals.match (var "marg")
-          -- Unapplied projection: |v| v.field
-          (right (rustClosure @@ list [string "v"] @@
-            (inject R._Expression R._Expression_fieldAccess $
+          -- Unapplied projection: |v| v.field.clone()
+          (right (rustClosure @@ nothing @@ list [string "v"] @@
+            cloned (inject R._Expression R._Expression_fieldAccess $
               record R._FieldAccessExpr [
                 R._FieldAccessExpr_object>>: rustExprPath @@ string "v",
                 R._FieldAccessExpr_field>>: var "fname"])))
           (lambda "arg" $
             "sarg" <<~ (encodeTerm @@ var "cx" @@ var "g" @@ var "arg") $
-              right (inject R._Expression R._Expression_fieldAccess $
+              right (cloned (inject R._Expression R._Expression_fieldAccess $
                 record R._FieldAccessExpr [
                   R._FieldAccessExpr_object>>: var "sarg",
-                  R._FieldAccessExpr_field>>: var "fname"]))
+                  R._FieldAccessExpr_field>>: var "fname"])))
 
 -- | Encode a Hydra record field as a Rust struct field
 encodeStructField :: TypedTermDefinition (InferenceContext -> Graph -> FieldType -> Either Error R.StructField)
@@ -296,22 +397,25 @@ encodeTerm = def "encodeTerm" $
     [_Term_annotated>>: lambda "at" $
        encodeTerm @@ var "cx" @@ var "g" @@ Core.annotatedTermBody (var "at"),
      _Term_application>>: lambda "app" $
-       "fun" <<~ (encodeTerm @@ var "cx" @@ var "g" @@ Core.applicationFunction (var "app")) $
-       "arg" <<~ (encodeTerm @@ var "cx" @@ var "g" @@ Core.applicationArgument (var "app")) $
-         right (rustCall @@ var "fun" @@ list [var "arg"]),
+       encodeApplied @@ var "cx" @@ var "g" @@ var "term",
      _Term_either>>: lambda "e" $
        Eithers.either
          (lambda "l" $
            "sl" <<~ (encodeTerm @@ var "cx" @@ var "g" @@ var "l") $
-             right (rustCall @@ (rustExprPath @@ string "Left") @@ list [var "sl"]))
+             right (rustCall @@ (rustExprPath @@ string "Either::Left") @@ list [var "sl"]))
          (lambda "r" $
            "sr" <<~ (encodeTerm @@ var "cx" @@ var "g" @@ var "r") $
-             right (rustCall @@ (rustExprPath @@ string "Right") @@ list [var "sr"]))
+             right (rustCall @@ (rustExprPath @@ string "Either::Right") @@ list [var "sr"]))
          (var "e"),
      _Term_lambda>>: lambda "lam" $
-       "param" <~ (Formatting.convertCaseCamelToLowerSnake @@ Core.unName (Core.lambdaParameter (var "lam"))) $
+       "param" <~ localSnake (Core.lambdaParameter (var "lam")) $
        "body" <<~ (encodeTerm @@ var "cx" @@ var "g" @@ Core.lambdaBody (var "lam")) $
-         right (rustClosure @@ list [var "param"] @@ var "body"),
+       "ann" <<~ Optionals.match (Core.lambdaDomain (var "lam"))
+         (right nothing)
+         (lambda "dom" $
+           "encoded" <<~ (encodeType @@ var "cx" @@ var "g" @@ var "dom") $
+             right (just (var "encoded"))) $
+         right (rustClosure @@ var "ann" @@ list [var "param"] @@ var "body"),
      _Term_project>>: lambda "proj" $
        encodeProjectionElim @@ var "cx" @@ var "g" @@ var "proj" @@ nothing,
      _Term_cases>>: lambda "cs" $
@@ -384,7 +488,7 @@ encodeTerm = def "encodeTerm" $
            list [inject R._Expression R._Expression_array $
              inject R._ArrayExpr R._ArrayExpr_elements (var "sels")]),
      _Term_inject>>: lambda "inj" $
-       "tname" <~ (Formatting.capitalize @@ (Names.localNameOf @@ Core.injectionTypeName (var "inj"))) $
+       "tname" <~ rustNominal (Core.injectionTypeName (var "inj")) $
        "field" <~ Core.injectionField (var "inj") $
        "fname" <~ (Formatting.capitalize @@ Core.unName (Core.fieldName (var "field"))) $
        "fterm" <~ Core.fieldTerm (var "field") $
@@ -392,14 +496,16 @@ encodeTerm = def "encodeTerm" $
        "isUnit" <~ (match _Term (var "dterm") (Just $ boolean False) [
          _Term_unit>>: constant $ boolean True,
          _Term_record>>: lambda "rt" $ Lists.isEmpty (Core.recordFields (var "rt"))]) $
-       Logic.ifElse (var "isUnit")
+       -- either<unit, _> still carries a unit payload. A nominal unit variant does not.
+       "nominalUnit" <~ Logic.and (var "isUnit") (Logic.not (Equality.equal (var "tname") (string "Either"))) $
+       Logic.ifElse (var "nominalUnit")
          (right (rustExprPath @@ Strings.concat2 (Strings.concat2 (var "tname") (string "::")) (var "fname")))
          ("sval" <<~ (encodeTerm @@ var "cx" @@ var "g" @@ var "fterm") $
            right (rustCall @@ (rustExprPath @@ Strings.concat2 (Strings.concat2 (var "tname") (string "::")) (var "fname")) @@ list [var "sval"])),
      _Term_unit>>: constant $
        right (inject R._Expression R._Expression_tuple $ list ([] :: [TypedTerm R.Expression])),
      _Term_variable>>: lambda "name" $
-       right (rustExprPath @@ (Formatting.convertCaseCamelToLowerSnake @@ (Formatting.sanitizeWithUnderscores @@ RustLanguageSource.rustReservedWords @@ Core.unName (var "name")))),
+       right (cloned (rustExprPath @@ localSnake (var "name"))),
      _Term_wrap>>: lambda "wt" $
        "tname" <~ (Formatting.capitalize @@ (Names.localNameOf @@ Core.wrappedTermTypeName (var "wt"))) $
        "inner" <<~ (encodeTerm @@ var "cx" @@ var "g" @@ Core.wrappedTermBody (var "wt")) $
@@ -417,8 +523,16 @@ encodeTermDefinition = def "encodeTermDefinition" $
     "name" <~ Packaging.termDefinitionName (var "tdef") $
     "term" <~ Packaging.termDefinitionBody (var "tdef") $
     "lname" <~ (Formatting.convertCaseCamelToLowerSnake @@ (Names.localNameOf @@ var "name")) $
-    "typ" <~ Optionals.match (Optionals.map (asTerm Scoping.termSignatureToTypeScheme) $ Packaging.termDefinitionSignature (var "tdef")) (Core.typeVariable (wrap _Name (string "hydra.core.model.Unit"))) (reify Core.typeSchemeBody) $
-    "body" <<~ (encodeTerm @@ var "cx" @@ var "g" @@ var "term") $
+    "parameters" <~ Optionals.match (Packaging.termDefinitionSignature (var "tdef")) (list ([] :: [TypedTerm TermTyping.Parameter])) (lambda "sig" $ Typing.termSignatureParameters (var "sig")) $
+    "typ" <~ Optionals.match (Packaging.termDefinitionSignature (var "tdef")) (Core.typeVariable (wrap _Name (string "hydra.core.model.Unit"))) (lambda "sig" $ Typing.resultType (Typing.termSignatureResult (var "sig"))) $
+    "bodyTerm" <~ Lists.foldl
+      (lambda "current" $ lambda "_" $
+        match _Term (Strip.deannotateTerm @@ var "current") (Just $ var "current") [
+          _Term_lambda>>: lambda "lam" $ Core.lambdaBody (var "lam")])
+      (var "term")
+      (var "parameters") $
+    "fnParams" <<~ (Eithers.mapList (encodeParameter @@ var "cx" @@ var "g") (var "parameters")) $
+    "body" <<~ (encodeTerm @@ var "cx" @@ var "g" @@ var "bodyTerm") $
     "retType" <<~ (encodeType @@ var "cx" @@ var "g" @@ var "typ") $
       right (record R._ItemWithComments [
         R._ItemWithComments_doc>>: nothing,
@@ -428,7 +542,7 @@ encodeTermDefinition = def "encodeTermDefinition" $
             R._FnDef_name>>: var "lname",
             R._FnDef_generics>>: list ([] :: [TypedTerm R.GenericParam]),
             R._FnDef_whereClause>>: nothing,
-            R._FnDef_params>>: list ([] :: [TypedTerm R.FnParam]),
+            R._FnDef_params>>: var "fnParams",
             R._FnDef_returnType>>: just (var "retType"),
             R._FnDef_body>>: record R._Block [
               R._Block_statements>>: list ([] :: [TypedTerm R.Statement]),
@@ -504,7 +618,7 @@ encodeType = def "encodeType" $
       _Type_wrap>>: lambda "_" $
         left (Error.errorOther $ Error.otherError (string "unexpected anonymous wrap type")),
       _Type_variable>>: lambda "name" $
-        right (rustPath @@ (Formatting.capitalize @@ Core.unName (var "name"))),
+        right (rustPath @@ rustNominal (var "name")),
       _Type_forall>>: lambda "fa" $
         encodeType @@ var "cx" @@ var "g" @@ Core.forallTypeBody (var "fa")]
 
@@ -513,16 +627,18 @@ encodeType = def "encodeType" $
 -- =============================================================================
 
 -- | Encode a Hydra type definition as a Rust item
-encodeTypeDefinition :: TypedTermDefinition (InferenceContext -> Graph -> TypeDefinition -> Either Error R.ItemWithComments)
+encodeTypeDefinition :: TypedTermDefinition (InferenceContext -> Graph -> S.Set Name -> TypeDefinition -> Either Error R.ItemWithComments)
 encodeTypeDefinition = def "encodeTypeDefinition" $
-  doc "Encode a Hydra type definition as a Rust item" $
-  "cx" ~> "g" ~> lambda "tdef" $
+  doc "Encode a Hydra type definition as a Rust item. A name defined in the same module is a reference, not a type parameter." $
+  "cx" ~> "g" ~> "defined" ~> lambda "tdef" $
     "name" <~ Packaging.typeDefinitionName (var "tdef") $
     "typ" <~ (Core.typeSchemeBody $ Packaging.typeDefinitionBody (var "tdef")) $
     "lname" <~ (Formatting.capitalize @@ (Names.localNameOf @@ var "name")) $
-    -- Filter free type variables to unqualified names only (type parameters, not type references)
+    -- Unqualified free names are type parameters, except names this module defines.
     "freeVars" <~ (Lists.filter
-      (lambda "v" $ Equality.equal (Lists.length (Strings.splitOn (string ".") (Core.unName (var "v")))) (int32 1))
+      (lambda "v" $ Logic.and
+        (Equality.equal (Lists.length (Strings.splitOn (string ".") (Core.unName (var "v")))) (int32 1))
+        (Logic.not (Sets.member (var "v") (var "defined"))))
       (Sets.toList (Variables.freeVariablesInType @@ var "typ"))) $
     "generics" <~ (Lists.map (lambda "v" $
       record R._GenericParam [
@@ -585,37 +701,167 @@ encodeTypeDefinition = def "encodeTypeDefinition" $
 -- Term definition encoding
 -- =============================================================================
 
+isIntegerPrimitive :: TypedTerm String -> TypedTerm Bool
+isIntegerPrimitive name =
+  Logic.or (Equality.equal name (string "hydra.lib.integers.compare")) $
+  Logic.or (Equality.equal name (string "hydra.lib.integers.add")) $
+  Logic.or (Equality.equal name (string "hydra.lib.integers.sub")) $
+  Logic.or (Equality.equal name (string "hydra.lib.integers.mul")) $
+  Logic.or (Equality.equal name (string "hydra.lib.integers.div")) $
+  Logic.or (Equality.equal name (string "hydra.lib.integers.max")) $
+    Equality.equal name (string "hydra.lib.integers.min")
+
+requireArg :: TypedTerm Int -> TypedTerm [Term] -> TypedTerm (Either Error Term)
+requireArg index args =
+  Optionals.match (Lists.at index args)
+    (left (Error.errorOther $ Error.otherError (string "integer primitive is missing an operand")))
+    (lambda "operand" $ right (var "operand"))
+
+applicationSpine :: TypedTermDefinition (Term -> (Term, [Term]))
+applicationSpine = def "applicationSpine" $
+  doc "Flatten a curried application. The argument list is outermost-first." $
+  lambda "term" $
+    match _Term (Strip.deannotateTerm @@ var "term") (Just $ pair (var "term") (list ([] :: [TypedTerm Term]))) [
+      _Term_application>>: lambda "app" $
+        "inner" <~ (applicationSpine @@ Core.applicationFunction (var "app")) $
+          pair (Pairs.first (var "inner")) (Lists.cons (Core.applicationArgument (var "app")) (Pairs.second (var "inner")))]
+
+encodeApplied :: TypedTermDefinition (InferenceContext -> Graph -> Term -> Either Error R.Expression)
+encodeApplied = def "encodeApplied" $
+  doc "Encode a saturated application. Integer primitives become operators. Other names become one Rust call." $
+  "cx" ~> "g" ~> lambda "term" $
+    "sp" <~ (applicationSpine @@ var "term") $
+    "head" <~ Pairs.first (var "sp") $
+    "args" <~ Lists.reverse (Pairs.second (var "sp")) $
+    "dhead" <~ (Strip.deannotateTerm @@ var "head") $
+      match _Term (var "dhead") (Just $ encodeCurriedCall @@ var "cx" @@ var "g" @@ var "head" @@ var "args") [
+        _Term_variable>>: lambda "name" $
+          encodeNamedCall @@ var "cx" @@ var "g" @@ Core.unName (var "name") @@ var "args",
+        _Term_project>>: lambda "proj" $
+          Optionals.match (Lists.head (var "args"))
+            (encodeProjectionElim @@ var "cx" @@ var "g" @@ var "proj" @@ nothing)
+            (lambda "arg" $ encodeProjectionElim @@ var "cx" @@ var "g" @@ var "proj" @@ just (var "arg")),
+        _Term_cases>>: lambda "cs" $
+          Optionals.match (Lists.head (var "args"))
+            (encodeUnionElim @@ var "cx" @@ var "g" @@ var "cs" @@ nothing)
+            (lambda "arg" $ encodeUnionElim @@ var "cx" @@ var "g" @@ var "cs" @@ just (var "arg")),
+        _Term_unwrap>>: lambda "wname" $
+          Optionals.match (Lists.head (var "args"))
+            (encodeUnwrapElim @@ var "cx" @@ var "g" @@ var "wname" @@ nothing)
+            (lambda "arg" $ encodeUnwrapElim @@ var "cx" @@ var "g" @@ var "wname" @@ just (var "arg"))]
+
+encodeCurriedCall :: TypedTermDefinition (InferenceContext -> Graph -> Term -> [Term] -> Either Error R.Expression)
+encodeCurriedCall = def "encodeCurriedCall" $
+  doc "Encode an application whose function is not a name, one argument at a time." $
+  "cx" ~> "g" ~> lambda "fun" $ lambda "args" $
+    "funExpr" <<~ (encodeTerm @@ var "cx" @@ var "g" @@ var "fun") $
+    "argExprs" <<~ (Eithers.mapList (encodeTerm @@ var "cx" @@ var "g") (var "args")) $
+      right (Lists.foldl
+        (lambda "acc" $ lambda "arg" $ rustCall @@ var "acc" @@ list [var "arg"])
+        (var "funExpr")
+        (var "argExprs"))
+
+encodeIntegerPrimitive :: TypedTermDefinition (InferenceContext -> Graph -> String -> [Term] -> Either Error R.Expression)
+encodeIntegerPrimitive = def "encodeIntegerPrimitive" $
+  doc "Lower a hydra.lib.integers primitive. compare returns the IntegersOrder enum." $
+  "cx" ~> "g" ~> lambda "name" $ lambda "args" $
+    "leftTerm" <<~ requireArg (int32 0) (var "args") $
+    "rightTerm" <<~ requireArg (int32 1) (var "args") $
+    "left" <<~ (encodeTerm @@ var "cx" @@ var "g" @@ var "leftTerm") $
+    "right" <<~ (encodeTerm @@ var "cx" @@ var "g" @@ var "rightTerm") $
+      Logic.ifElse (Equality.equal (var "name") (string "hydra.lib.integers.add"))
+        (right (rustBinary (var "left") (inject R._BinaryOp R._BinaryOp_add unit) (var "right")))
+        (Logic.ifElse (Equality.equal (var "name") (string "hydra.lib.integers.sub"))
+          (right (rustBinary (var "left") (inject R._BinaryOp R._BinaryOp_sub unit) (var "right")))
+          (Logic.ifElse (Equality.equal (var "name") (string "hydra.lib.integers.mul"))
+            (right (rustBinary (var "left") (inject R._BinaryOp R._BinaryOp_mul unit) (var "right")))
+            (Logic.ifElse (Equality.equal (var "name") (string "hydra.lib.integers.div"))
+              (right (rustBinary (var "left") (inject R._BinaryOp R._BinaryOp_div unit) (var "right")))
+              (Logic.ifElse (Equality.equal (var "name") (string "hydra.lib.integers.max"))
+                (right (rustCall @@ (rustExprPath @@ string "std::cmp::max") @@ list [var "left", var "right"]))
+                (Logic.ifElse (Equality.equal (var "name") (string "hydra.lib.integers.min"))
+                  (right (rustCall @@ (rustExprPath @@ string "std::cmp::min") @@ list [var "left", var "right"]))
+                  (Logic.ifElse (Equality.equal (var "name") (string "hydra.lib.integers.compare"))
+                    (right (ifExpr
+                      (rustBinary (var "left") (inject R._BinaryOp R._BinaryOp_gt unit) (var "right"))
+                      (rustExprPath @@ string "IntegersOrder::Gt")
+                      (ifExpr
+                        (rustBinary (var "left") (inject R._BinaryOp R._BinaryOp_lt unit) (var "right"))
+                        (rustExprPath @@ string "IntegersOrder::Lt")
+                        (rustExprPath @@ string "IntegersOrder::Eq"))))
+                    (left (Error.errorOther $ Error.otherError (string "unknown integer primitive")))))))))
+
+encodeNamedCall :: TypedTermDefinition (InferenceContext -> Graph -> String -> [Term] -> Either Error R.Expression)
+encodeNamedCall = def "encodeNamedCall" $
+  doc "Encode a named saturated call, lowering hydra.lib.integers primitives." $
+  "cx" ~> "g" ~> lambda "name" $ lambda "args" $
+    Logic.ifElse (Logic.and (isIntegerPrimitive (var "name")) (Equality.equal (Lists.length (var "args")) (int32 2)))
+      (encodeIntegerPrimitive @@ var "cx" @@ var "g" @@ var "name" @@ var "args")
+      ("encoded" <<~ (Eithers.mapList (encodeTerm @@ var "cx" @@ var "g") (var "args")) $
+        right (rustCall @@ (rustExprPath @@ localSnake (wrap _Name (var "name"))) @@ var "encoded"))
+
+encodeParameter :: TypedTermDefinition (InferenceContext -> Graph -> TermTyping.Parameter -> Either Error R.FnParam)
+encodeParameter = def "encodeParameter" $
+  doc "Encode a Hydra signature parameter as a Rust function parameter." $
+  "cx" ~> "g" ~> lambda "param" $
+    "pname" <~ localSnake (Typing.parameterName (var "param")) $
+    "ptype" <<~ (encodeType @@ var "cx" @@ var "g" @@ Typing.parameterType (var "param")) $
+      right (record R._FnParam [
+        R._FnParam_pattern>>:
+          inject R._Pattern R._Pattern_identifier $
+            record R._IdentifierPattern [
+              R._IdentifierPattern_name>>: var "pname",
+              R._IdentifierPattern_mutable>>: boolean False,
+              R._IdentifierPattern_atPattern>>: nothing],
+        R._FnParam_type>>: var "ptype"])
+
 -- | Encode a Hydra case statement (union elimination) as a Rust expression.
 -- Takes an optional argument for applied case statements.
 encodeUnionElim :: TypedTermDefinition (InferenceContext -> Graph -> CaseStatement -> Maybe Term -> Either Error R.Expression)
 encodeUnionElim = def "encodeUnionElim" $
   doc "Encode a Hydra case statement (union elimination) as a Rust expression. Takes an optional argument for applied case statements." $
   "cx" ~> "g" ~> lambda "cs" $ lambda "marg" $
-        "tname" <~ (Formatting.capitalize @@ (Names.localNameOf @@ Core.caseStatementTypeName (var "cs"))) $
+        "tname" <~ rustNominal (Core.caseStatementTypeName (var "cs")) $
         "caseFields" <~ Core.caseStatementCases (var "cs") $
         "defCase" <~ Core.caseStatementDefault (var "cs") $
         "arms" <<~ (Eithers.mapList
           (lambda "cf" $
             "cfname" <~ (Formatting.capitalize @@ Core.unName (Core.caseAlternativeName (var "cf"))) $
             "cfterm" <~ Core.caseAlternativeHandler (var "cf") $
-            "armBody" <<~ (encodeTerm @@ var "cx" @@ var "g" @@ (Core.termApplication (Core.application (var "cfterm") (Core.termVariable (wrap _Name (string "v")))))) $
+            "variantPath" <~ Strings.concat2 (Strings.concat2 (var "tname") (string "::")) (var "cfname") $
+            "handlerDomain" <~ match _Term (Strip.deannotateTerm @@ var "cfterm") (Just $ nothing) [
+                _Term_lambda>>: lambda "lam" $ Core.lambdaDomain (var "lam")] $
+            "domainIsUnit" <~ Optionals.match (var "handlerDomain") (boolean False) (lambda "dom" $
+                match _Type (Strip.deannotateType @@ var "dom") (Just $ boolean False) [
+                  _Type_unit>>: constant $ boolean True]) $
+            "nominalUnit" <~ Logic.and (var "domainIsUnit") (Logic.not (Equality.equal (var "tname") (string "Either"))) $
+            "payload" <~ Logic.ifElse (var "nominalUnit") Core.termUnit (Core.termVariable (wrap _Name (string "v"))) $
+            "armBody" <<~ (encodeTerm @@ var "cx" @@ var "g" @@ (Core.termApplication (Core.application (var "cfterm") (var "payload")))) $
+            "armPattern" <~ Logic.ifElse (var "nominalUnit")
+              (inject R._Pattern R._Pattern_path $
+                record R._ExprPath [
+                  R._ExprPath_global>>: boolean False,
+                  R._ExprPath_segments>>: list [
+                    record R._PathSegment [
+                      R._PathSegment_name>>: var "variantPath",
+                      R._PathSegment_arguments>>: inject R._GenericArguments R._GenericArguments_none unit]]])
+              (inject R._Pattern R._Pattern_tupleStruct $
+                record R._TupleStructPattern [
+                  R._TupleStructPattern_path>>:
+                    record R._ExprPath [
+                      R._ExprPath_global>>: boolean False,
+                      R._ExprPath_segments>>: list [
+                        record R._PathSegment [
+                          R._PathSegment_name>>: var "variantPath",
+                          R._PathSegment_arguments>>: inject R._GenericArguments R._GenericArguments_none unit]]],
+                  R._TupleStructPattern_elements>>: list [
+                    inject R._Pattern R._Pattern_identifier $
+                      record R._IdentifierPattern [
+                        R._IdentifierPattern_name>>: string "v",
+                        R._IdentifierPattern_mutable>>: boolean False,
+                        R._IdentifierPattern_atPattern>>: nothing]]]) $
               right (record R._MatchArm [
-                R._MatchArm_pattern>>:
-                  inject R._Pattern R._Pattern_tupleStruct $
-                    record R._TupleStructPattern [
-                      R._TupleStructPattern_path>>:
-                        record R._ExprPath [
-                          R._ExprPath_global>>: boolean False,
-                          R._ExprPath_segments>>: list [
-                            record R._PathSegment [
-                              R._PathSegment_name>>: Strings.concat2 (Strings.concat2 (var "tname") (string "::")) (var "cfname"),
-                              R._PathSegment_arguments>>: inject R._GenericArguments R._GenericArguments_none unit]]],
-                      R._TupleStructPattern_elements>>: list [
-                        inject R._Pattern R._Pattern_identifier $
-                          record R._IdentifierPattern [
-                            R._IdentifierPattern_name>>: string "v",
-                            R._IdentifierPattern_mutable>>: boolean False,
-                            R._IdentifierPattern_atPattern>>: nothing]]],
+                R._MatchArm_pattern>>: var "armPattern",
                 R._MatchArm_guard>>: nothing,
                 R._MatchArm_body>>: var "armBody"]))
           (var "caseFields")) $
@@ -626,22 +872,29 @@ encodeUnionElim = def "encodeUnionElim" $
             "defBody" <<~ (encodeTerm @@ var "cx" @@ var "g" @@ (Core.termApplication (Core.application (var "dt") (Core.termVariable (wrap _Name (string "v")))))) $
             right (Lists.concat2 (var "arms") (list [
               record R._MatchArm [
-                R._MatchArm_pattern>>: inject R._Pattern R._Pattern_wildcard unit,
+                R._MatchArm_pattern>>:
+                  inject R._Pattern R._Pattern_identifier $
+                    record R._IdentifierPattern [
+                      R._IdentifierPattern_name>>: string "v",
+                      R._IdentifierPattern_mutable>>: boolean False,
+                      R._IdentifierPattern_atPattern>>: nothing],
                 R._MatchArm_guard>>: nothing,
                 R._MatchArm_body>>: var "defBody"]])))) $
-        Optionals.match (var "marg")
-          -- Unapplied: |v| match v { ... }
-          (right (rustClosure @@ list [string "v"] @@
-            (inject R._Expression R._Expression_match $
-              record R._MatchExpr [
-                R._MatchExpr_scrutinee>>: rustExprPath @@ string "v",
-                R._MatchExpr_arms>>: var "allArms"])))
-          (lambda "arg" $
-            "sarg" <<~ (encodeTerm @@ var "cx" @@ var "g" @@ var "arg") $
-              right (inject R._Expression R._Expression_match $
+        Logic.ifElse (Lists.isEmpty (var "allArms"))
+          (right panicStuck)
+          (Optionals.match (var "marg")
+            -- Unapplied: |v| match v { ... }
+            (right (rustClosure @@ nothing @@ list [string "v"] @@
+              (inject R._Expression R._Expression_match $
                 record R._MatchExpr [
-                  R._MatchExpr_scrutinee>>: var "sarg",
-                  R._MatchExpr_arms>>: var "allArms"]))
+                  R._MatchExpr_scrutinee>>: rustExprPath @@ string "v",
+                  R._MatchExpr_arms>>: var "allArms"])))
+            (lambda "arg" $
+              "sarg" <<~ (encodeTerm @@ var "cx" @@ var "g" @@ var "arg") $
+                right (inject R._Expression R._Expression_match $
+                  record R._MatchExpr [
+                    R._MatchExpr_scrutinee>>: var "sarg",
+                    R._MatchExpr_arms>>: var "allArms"])))
 
 -- | Encode a Hydra wrap elimination (unwrap) as a Rust expression.
 -- Takes an optional argument for applied unwraps.
@@ -651,7 +904,7 @@ encodeUnwrapElim = def "encodeUnwrapElim" $
   "cx" ~> "g" ~> lambda "name" $ lambda "marg" $
         Optionals.match (var "marg")
           -- Unapplied: |v| v.0
-          (right (rustClosure @@ list [string "v"] @@
+          (right (rustClosure @@ nothing @@ list [string "v"] @@
             (inject R._Expression R._Expression_tupleIndex $
               record R._TupleIndexExpr [
                 R._TupleIndexExpr_tuple>>: rustExprPath @@ string "v",
@@ -667,6 +920,18 @@ encodeUnwrapElim = def "encodeUnwrapElim" $
 -- Struct field encoding
 -- =============================================================================
 
+supportItems :: TypedTermDefinition [R.ItemWithComments]
+supportItems = def "supportItems" $
+  doc "Either and the integer ordering enum. Every generated module can name them." $
+  list [
+    pubEnum (string "Either") (list [genericParam "L", genericParam "R"]) (list [
+      tupleVariant "Left" (rustPath @@ string "L"),
+      tupleVariant "Right" (rustPath @@ string "R")]),
+    pubEnum (string "IntegersOrder") (list ([] :: [TypedTerm R.GenericParam])) (list [
+      unitVariant "Lt",
+      unitVariant "Eq",
+      unitVariant "Gt"])]
+
 -- | Convert a Hydra module to a map of file paths to Rust source code strings.
 moduleToRust :: TypedTermDefinition (Module -> [Definition] -> InferenceContext -> Graph -> Either Error (M.Map FilePath String))
 moduleToRust = def "moduleToRust" $
@@ -675,9 +940,10 @@ moduleToRust = def "moduleToRust" $
     "partitioned" <~ (Environment.partitionDefinitions @@ var "defs") $
     "typeDefs" <~ Pairs.first (var "partitioned") $
     "termDefs" <~ Pairs.second (var "partitioned") $
-    "typeItems" <<~ (Eithers.mapList (encodeTypeDefinition @@ var "cx" @@ var "g") (var "typeDefs")) $
+    "defined" <~ Sets.fromList (Lists.map (lambda "td" $ Packaging.typeDefinitionName (var "td")) (var "typeDefs")) $
+    "typeItems" <<~ (Eithers.mapList (encodeTypeDefinition @@ var "cx" @@ var "g" @@ var "defined") (var "typeDefs")) $
     "termItems" <<~ (Eithers.mapList (encodeTermDefinition @@ var "cx" @@ var "g") (var "termDefs")) $
-    "allItems" <~ Lists.concat2 (var "typeItems") (var "termItems") $
+    "allItems" <~ Lists.concat2 (asTerm supportItems) (Lists.concat2 (var "typeItems") (var "termItems")) $
     "crate" <~ (record R._Crate [R._Crate_items>>: var "allItems"]) $
     "code" <~ (SerializationSource.printExpr @@ (SerializationSource.parenthesize @@ (RustSerdeSource.crateToExpr @@ var "crate"))) $
     "filePath" <~ (Names.moduleNameToFilePath @@ Util.caseConventionLowerSnake @@ wrap _FileExtension (string "rs") @@ (Packaging.moduleName (var "mod"))) $
@@ -738,11 +1004,11 @@ rustCall = def "rustCall" $
         R._CallExpr_function>>: var "fun",
         R._CallExpr_args>>: var "args"]
 
--- | Closure expression: |params| body
-rustClosure :: TypedTermDefinition ([String] -> R.Expression -> R.Expression)
+-- | Closure expression: |params| body. The annotation is each parameter's type, when known.
+rustClosure :: TypedTermDefinition (Maybe R.Type -> [String] -> R.Expression -> R.Expression)
 rustClosure = def "rustClosure" $
-  doc "Closure expression: |params| body" $
-  lambda "params" $ lambda "body" $
+  doc "Closure expression: |params| body. The annotation is each parameter's type, when known." $
+  lambda "ann" $ lambda "params" $ lambda "body" $
     inject R._Expression R._Expression_closure $
       record R._ClosureExpr [
         R._ClosureExpr_move>>: boolean False,
@@ -755,7 +1021,7 @@ rustClosure = def "rustClosure" $
                     R._IdentifierPattern_name>>: var "p",
                     R._IdentifierPattern_mutable>>: boolean False,
                     R._IdentifierPattern_atPattern>>: nothing],
-              R._ClosureParam_type>>: nothing])
+              R._ClosureParam_type>>: var "ann"])
           (var "params"),
         R._ClosureExpr_returnType>>: nothing,
         R._ClosureExpr_body>>: var "body"]
